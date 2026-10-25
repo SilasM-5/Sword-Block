@@ -1,0 +1,556 @@
+name: build
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v6
+      - name: setup jdk
+        uses: actions/setup-java@v5
+        with:
+          java-version: '25'
+          distribution: 'microsoft'
+      - name: setup gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.8.2'
+      - name: build
+        run: gradle build
+      - name: capture build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: Artifacts
+          path: build/libs/
+
+
+===== FILE: .gitignore =====
+# gradle
+
+.gradle/
+build/
+out/
+classes/
+
+# eclipse
+
+*.launch
+
+# idea
+
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# vscode
+
+.settings/
+.vscode/
+bin/
+.classpath
+.project
+
+# macos
+
+*.DS_Store
+
+# fabric
+
+run/
+
+# java
+
+hs_err_*.log
+replay_*.log
+*.hprof
+*.jfr
+
+
+===== FILE: LICENSE =====
+MIT License
+
+Copyright (c) 2020 MidnightDust
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+===== FILE: build.gradle =====
+plugins {
+	id 'net.fabricmc.fabric-loom' version "${loom_version}"
+	id 'maven-publish'
+}
+
+version = project.mod_version
+base {
+	archivesName = project.archives_base_name
+}
+
+loom {
+	mods {
+		"swordblocking" {
+			sourceSet sourceSets.main
+		}
+	}
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+}
+
+processResources {
+	def version = project.version
+	inputs.property "version", version
+
+	filesMatching("fabric.mod.json") {
+		expand "version": version
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 25
+}
+
+java {
+	withSourcesJar()
+
+	sourceCompatibility = JavaVersion.VERSION_25
+	targetCompatibility = JavaVersion.VERSION_25
+}
+
+jar {
+	def projectName = project.name
+	inputs.property "projectName", projectName
+
+	from("LICENSE") {
+		rename { "${it}_$projectName"}
+	}
+}
+
+
+===== FILE: gradle.properties =====
+org.gradle.jvmargs=-Xmx2G
+org.gradle.parallel=true
+org.gradle.configuration-cache=true
+
+# Fabric Properties (from the fabric-example-mod 26.2 branch)
+minecraft_version=26.2
+loader_version=0.20.1
+loom_version=1.19-SNAPSHOT
+
+# Mod Properties
+mod_version=2.2.2+26.2
+archives_base_name=swordblocking
+
+
+===== FILE: settings.gradle =====
+pluginManagement {
+	repositories {
+		maven {
+			name = 'Fabric'
+			url = 'https://maven.fabricmc.net/'
+		}
+		mavenCentral()
+		gradlePluginPortal()
+	}
+}
+
+rootProject.name = 'swordblocking'
+
+
+===== FILE: src/main/java/eu/midnightdust/swordblocking/SwordBlockingClient.java =====
+package eu.midnightdust.swordblocking;
+
+import eu.midnightdust.swordblocking.config.SwordBlockingConfig;
+import net.fabricmc.api.ClientModInitializer;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+
+public final class SwordBlockingClient implements ClientModInitializer {
+    public static final String MOD_ID = "swordblocking";
+
+    /** A plain check on the item instead of the old ShieldItem class, which may not exist in newer versions. */
+    public static boolean isShield(ItemStack stack) {
+        return stack.is(Items.SHIELD);
+    }
+
+    public static boolean canEntityBlock(ItemStack mainHandStack, ItemStack offHandStack) {
+        return SwordBlockingConfig.enabled && canShieldSwordBlock(mainHandStack, offHandStack);
+    }
+
+    public static boolean canShieldSwordBlock(ItemStack mainHandStack, ItemStack offHandStack) {
+        if (SwordBlockingConfig.enabled && (isShield(offHandStack) || isShield(mainHandStack))) {
+            final ItemStack weaponStack = isShield(offHandStack) ? mainHandStack : offHandStack;
+            return weaponStack.has(DataComponents.DAMAGE);
+        }
+        return false;
+    }
+
+    public static boolean shouldHideShield(ItemStack mainHandStack, ItemStack offHandStack, ItemStack stack) {
+        if (SwordBlockingConfig.enabled && isShield(stack)) {
+            return (SwordBlockingConfig.alwaysHideShield && SwordBlockingConfig.hideShield)
+                    || (SwordBlockingConfig.hideShield && canShieldSwordBlock(mainHandStack, offHandStack));
+        }
+        return false;
+    }
+
+    @Override
+    public void onInitializeClient() {
+        SwordBlockingConfig.load();
+    }
+}
+
+
+===== FILE: src/main/java/eu/midnightdust/swordblocking/config/SwordBlockingConfig.java =====
+package eu.midnightdust.swordblocking.config;
+
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonObject;
+import net.fabricmc.loader.api.FabricLoader;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+/**
+ * Minimal config: edit config/swordblocking.json and restart the game.
+ * (The original uses MidnightLib for an in-game screen; it is left out here so the port has no extra dependency.)
+ */
+public final class SwordBlockingConfig {
+    public static boolean enabled = true;
+    public static boolean hideShield = true;
+    public static boolean alwaysHideShield = true;
+    public static boolean hideOffhandSlot = false;
+    public static boolean disableUseEquipAnimation = false;
+    public static boolean lockBlockingArmPosition = false;
+    public static boolean blockHitAnimation = false;
+
+    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+
+    private SwordBlockingConfig() {
+    }
+
+    public static void load() {
+        final Path file = FabricLoader.getInstance().getConfigDir().resolve("swordblocking.json");
+        try {
+            if (Files.exists(file)) {
+                final JsonObject json = GSON.fromJson(Files.readString(file), JsonObject.class);
+                if (json != null) {
+                    enabled = bool(json, "enabled", enabled);
+                    hideShield = bool(json, "hideShield", hideShield);
+                    alwaysHideShield = bool(json, "alwaysHideShield", alwaysHideShield);
+                    hideOffhandSlot = bool(json, "hideOffhandSlot", hideOffhandSlot);
+                    disableUseEquipAnimation = bool(json, "disableUseEquipAnimation", disableUseEquipAnimation);
+                    lockBlockingArmPosition = bool(json, "lockBlockingArmPosition", lockBlockingArmPosition);
+                    blockHitAnimation = bool(json, "blockHitAnimation", blockHitAnimation);
+                }
+            }
+            save(file);
+        } catch (IOException | RuntimeException e) {
+            System.err.println("[SwordBlocking] Could not read config, using defaults: " + e);
+        }
+    }
+
+    private static boolean bool(JsonObject json, String key, boolean fallback) {
+        return json.has(key) && json.get(key).isJsonPrimitive() ? json.get(key).getAsBoolean() : fallback;
+    }
+
+    private static void save(Path file) throws IOException {
+        final JsonObject json = new JsonObject();
+        json.addProperty("enabled", enabled);
+        json.addProperty("hideShield", hideShield);
+        json.addProperty("alwaysHideShield", alwaysHideShield);
+        json.addProperty("hideOffhandSlot", hideOffhandSlot);
+        json.addProperty("disableUseEquipAnimation", disableUseEquipAnimation);
+        json.addProperty("lockBlockingArmPosition", lockBlockingArmPosition);
+        json.addProperty("blockHitAnimation", blockHitAnimation);
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, GSON.toJson(json));
+    }
+}
+
+
+===== FILE: src/main/java/eu/midnightdust/swordblocking/ducks/ArmedItemStackData.java =====
+package eu.midnightdust.swordblocking.ducks;
+
+import net.minecraft.world.entity.HumanoidArm;
+import net.minecraft.world.item.ItemStack;
+
+public interface ArmedItemStackData {
+    ItemStack swordblocking$getItemHeldByArm(HumanoidArm humanoidArm);
+
+    ItemStack swordblocking$getOffHandItem();
+
+    void swordblocking$setOffHandItem(ItemStack stack);
+
+    ItemStack swordblocking$getMainHandItem();
+
+    void swordblocking$setMainHandItem(ItemStack stack);
+}
+
+
+===== FILE: src/main/java/eu/midnightdust/swordblocking/mixins/MixinArmedEntityRenderState.java =====
+package eu.midnightdust.swordblocking.mixins;
+
+import eu.midnightdust.swordblocking.ducks.ArmedItemStackData;
+import net.minecraft.client.renderer.entity.state.ArmedEntityRenderState;
+import net.minecraft.client.renderer.item.ItemModelResolver;
+import net.minecraft.world.entity.HumanoidArm;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.item.ItemStack;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+@Mixin(ArmedEntityRenderState.class)
+public abstract class MixinArmedEntityRenderState implements ArmedItemStackData {
+    @Unique
+    private ItemStack swordblocking$offHandStack = ItemStack.EMPTY;
+
+    @Unique
+    private ItemStack swordblocking$mainHandStack = ItemStack.EMPTY;
+
+    @Inject(method = "extractArmedEntityRenderState", at = @At("TAIL"), require = 0)
+    private static void swordBlocking$storeRequiredData(LivingEntity livingEntity, ArmedEntityRenderState armedEntityRenderState, ItemModelResolver itemModelResolver, CallbackInfo ci) {
+        final ArmedItemStackData data = (ArmedItemStackData) armedEntityRenderState;
+        data.swordblocking$setOffHandItem(livingEntity.getOffhandItem());
+        data.swordblocking$setMainHandItem(livingEntity.getMainHandItem());
+    }
+
+    @Override
+    public ItemStack swordblocking$getItemHeldByArm(HumanoidArm arm) {
+        if (arm == HumanoidArm.LEFT) {
+            return swordblocking$offHandStack;
+        } else if (arm == HumanoidArm.RIGHT) {
+            return swordblocking$mainHandStack;
+        } else {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    @Override
+    public ItemStack swordblocking$getOffHandItem() {
+        return this.swordblocking$offHandStack;
+    }
+
+    @Override
+    public void swordblocking$setOffHandItem(ItemStack stack) {
+        this.swordblocking$offHandStack = stack;
+    }
+
+    @Override
+    public ItemStack swordblocking$getMainHandItem() {
+        return this.swordblocking$mainHandStack;
+    }
+
+    @Override
+    public void swordblocking$setMainHandItem(ItemStack stack) {
+        this.swordblocking$mainHandStack = stack;
+    }
+}
+
+
+===== FILE: src/main/java/eu/midnightdust/swordblocking/mixins/MixinHud.java =====
+package eu.midnightdust.swordblocking.mixins;
+
+import com.llamalad7.mixinextras.injector.ModifyExpressionValue;
+import eu.midnightdust.swordblocking.SwordBlockingClient;
+import eu.midnightdust.swordblocking.config.SwordBlockingConfig;
+import net.minecraft.client.gui.Hud;
+import net.minecraft.world.item.ItemStack;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+
+/** In 26.2 the hotbar code lives in Hud (it used to be in Gui) and is called extractItemHotbar. */
+@Mixin(Hud.class)
+public abstract class MixinHud {
+    @ModifyExpressionValue(
+            method = "extractItemHotbar",
+            at = @At(value = "INVOKE", target = "Lnet/minecraft/world/entity/player/Player;getOffhandItem()Lnet/minecraft/world/item/ItemStack;"),
+            require = 0
+    )
+    private ItemStack swordBlocking$hideOffHandSlot(ItemStack original) {
+        if (SwordBlockingConfig.enabled && SwordBlockingConfig.hideOffhandSlot && SwordBlockingClient.isShield(original)) {
+            return ItemStack.EMPTY;
+        }
+        return original;
+    }
+}
+
+
+===== FILE: src/main/java/eu/midnightdust/swordblocking/mixins/MixinHumanoidModel.java =====
+package eu.midnightdust.swordblocking.mixins;
+
+import eu.midnightdust.swordblocking.SwordBlockingClient;
+import eu.midnightdust.swordblocking.config.SwordBlockingConfig;
+import eu.midnightdust.swordblocking.ducks.ArmedItemStackData;
+import net.minecraft.client.model.HumanoidModel;
+import net.minecraft.client.renderer.entity.state.HumanoidRenderState;
+import net.minecraft.world.item.ItemStack;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.Redirect;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+@Mixin(HumanoidModel.class)
+public abstract class MixinHumanoidModel {
+    @Shadow
+    protected abstract void poseLeftArm(HumanoidRenderState renderState, HumanoidModel.ArmPose pose);
+
+    @Shadow
+    protected abstract void poseRightArm(HumanoidRenderState renderState, HumanoidModel.ArmPose pose);
+
+    @Inject(
+            method = "setupAnim(Lnet/minecraft/client/renderer/entity/state/HumanoidRenderState;)V",
+            at = @At(value = "INVOKE", target = "Lnet/minecraft/client/model/HumanoidModel;setupAttackAnimation(Lnet/minecraft/client/renderer/entity/state/HumanoidRenderState;F)V", shift = At.Shift.BEFORE),
+            require = 0
+    )
+    private void swordBlocking$setBlockingAngles(HumanoidRenderState renderState, CallbackInfo ci) {
+        final ArmedItemStackData data = (ArmedItemStackData) renderState;
+        final ItemStack offHandStack = data.swordblocking$getOffHandItem();
+        final ItemStack mainHandStack = data.swordblocking$getMainHandItem();
+        if (renderState.isUsingItem && SwordBlockingClient.canEntityBlock(mainHandStack, offHandStack)) {
+            if (SwordBlockingClient.isShield(offHandStack)) {
+                this.poseRightArm(renderState, HumanoidModel.ArmPose.BLOCK);
+            } else {
+                this.poseLeftArm(renderState, HumanoidModel.ArmPose.BLOCK);
+            }
+        }
+    }
+
+    @Redirect(
+            method = "poseBlockingArm",
+            at = @At(value = "INVOKE", target = "Lnet/minecraft/util/Mth;clamp(FFF)F"),
+            require = 0
+    )
+    private float swordBlocking$lockArmPosition(float value, float min, float max) {
+        if (SwordBlockingConfig.enabled && SwordBlockingConfig.lockBlockingArmPosition) {
+            return 0F;
+        }
+        return value;
+    }
+}
+
+
+===== FILE: src/main/java/eu/midnightdust/swordblocking/mixins/MixinItemInHandLayer.java =====
+package eu.midnightdust.swordblocking.mixins;
+
+import com.llamalad7.mixinextras.sugar.Local;
+import eu.midnightdust.swordblocking.SwordBlockingClient;
+import eu.midnightdust.swordblocking.config.SwordBlockingConfig;
+import eu.midnightdust.swordblocking.ducks.ArmedItemStackData;
+import net.minecraft.client.renderer.entity.layers.ItemInHandLayer;
+import net.minecraft.client.renderer.entity.state.ArmedEntityRenderState;
+import net.minecraft.client.renderer.item.ItemStackRenderState;
+import net.minecraft.world.entity.HumanoidArm;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Redirect;
+
+@Mixin(ItemInHandLayer.class)
+public abstract class MixinItemInHandLayer {
+    @Redirect(
+            method = "submitArmWithItem",
+            at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/item/ItemStackRenderState;isEmpty()Z"),
+            require = 0
+    )
+    private boolean swordBlocking$hideShield(ItemStackRenderState instance, @Local(argsOnly = true) ArmedEntityRenderState renderState, @Local(argsOnly = true) HumanoidArm arm) {
+        if (SwordBlockingConfig.enabled) {
+            final ArmedItemStackData data = (ArmedItemStackData) renderState;
+            return SwordBlockingClient.shouldHideShield(data.swordblocking$getMainHandItem(), data.swordblocking$getOffHandItem(), data.swordblocking$getItemHeldByArm(arm));
+        }
+        return instance.isEmpty();
+    }
+}
+
+
+===== FILE: src/main/java/eu/midnightdust/swordblocking/mixins/MixinItemInHandRenderer.java =====
+package eu.midnightdust.swordblocking.mixins;
+
+import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
+import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
+import com.llamalad7.mixinextras.sugar.Local;
+import com.mojang.blaze3d.vertex.PoseStack;
+import eu.midnightdust.swordblocking.SwordBlockingClient;
+import net.minecraft.client.player.AbstractClientPlayer;
+import net.minecraft.client.renderer.ItemInHandRenderer;
+import net.minecraft.client.renderer.SubmitNodeCollector;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.item.ItemDisplayContext;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.ItemUseAnimation;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Unique;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Redirect;
+
+/**
+ * First-person rendering. In 26.2 renderArmWithItem was renamed to submitArmWithItem, so both names are listed;
+ * require = 0 means a name that does not exist is skipped instead of crashing the game.
+ */
+@Mixin(ItemInHandRenderer.class)
+public abstract class MixinItemInHandRenderer {
+    @WrapMethod(method = {"renderItem", "submitItem"}, require = 0)
+    private void swordBlocking$hideShield(
+            LivingEntity entity,
+            ItemStack stack,
+            ItemDisplayContext displayContext,
+            PoseStack poseStack,
+            SubmitNodeCollector bufferSource,
+            int packedLight,
+            Operation<Void> original
+    ) {
+        if (!SwordBlockingClient.shouldHideShield(entity.getMainHandItem(), entity.getOffhandItem(), stack)) {
+            original.call(entity, stack, displayContext, poseStack, bufferSource, packedLight);
+        }
+    }
+
+    @Redirect(
+            method = {"renderArmWithItem", "submitArmWithItem"},
+            at = @At(value = "INVOKE", target = "Lnet/minecraft/client/player/AbstractClientPlayer;getUsedItemHand()Lnet/minecraft/world/InteractionHand;", ordinal = 1),
+            require = 0
+    )
+    private InteractionHand swordBlocking$changeActiveHand(AbstractClientPlayer instance) {
+        final InteractionHand activeHand = instance.getUsedItemHand();
+        if (SwordBlockingClient.canEntityBlock(instance.getMainHandItem(), instance.getOffhandItem())) {
+            return swordBlocking$getBlockingHand(activeHand);
+        }
+        return activeHand;
+    }
+
+    @Redirect(
+            method = {"renderArmWithItem", "submitArmWithItem"},
+            at = @At(value = "INVOKE", target = "Lnet/minecraft/world/item/ItemStack;getUseAnimation()Lnet/minecraft/world/item/ItemUseAnimation;"),
+            require = 0
+    )
+    private ItemUseAnimation swordBlocking$changeItemAction(ItemStack stack, @Local(argsOnly = true) AbstractClientPlayer player, @Local(argsOnly = true) InteractionHand interactionHand) {
+        final ItemUseAnimation defaultUseAction = stack.getUseAnimation();
+        if (SwordBlockingClient.canEntityBlock(player.getMainHandItem(), player.getOffhandItem())) {
+            return swordBlocking$getBlockingHand(player.getUsedItemHand())
